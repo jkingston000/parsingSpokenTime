@@ -1,0 +1,590 @@
+---
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 4
+    number_sections: true
+#  html_document:
+#    css: /Users/johnkingston/Dropbox/692F/fall17/lectures/css/Dillon_UMass.css
+#    css: /Users/jkingstn/Dropbox/692F/fall17/lectures/css/Dillon_UMass.css
+#    css: ~/Dropbox/Courses/LING609-Fall2014/Website/Dillon_UMass.css
+#    css: /Users/jkingstn/Dropbox/692F/fall17/lectures/css/Dillon_UMass.css
+---
+
+# Reanalysis of the vowel parsing results. Exp 02.
+
+The results of the second of three experiments assessing the parsing of consonants and vowels are reanalyzed here using the `brms` package. In all three experiments, listeners were presented with short-to-long diphthong-duration continuum in a /C-ai-t/ string in the context of a sentence that had been manipulated to sound as though it were spoken at fast, moderate, or slow rate. In Experiment 1, the initial consonant was a /b/, and listeners were asked to respond that the target consisted of just one syllable, i.e., "Bight," or two, i.e., "Byatt." (Upper case is used here because the sentence conveyed that the responses were surnames.) In Experiment 2, the one analyzed here, transition durations were manipulated at the beginning of the target stimulus to produce a stop-glide /b-w/ continuum, while in Experiment 3, voice onset times were manipulated instead to produce voiced-voiceless /b-p/ continuum. In both of these latter experiments, listeners chose one from four possible surname responses on each trial; in Experiment 2, "Bight," "Byatt," "Wight," or "Wyatt," in Experiment 3, "Bight," "Byatt," "Pight," or "Pyatt."
+
+## Packages, etc.
+
+Load packages.
+
+```{r}
+
+library(rstan)
+library(rstanarm)
+library(brms)
+library(bayesplot)
+library(loo)
+library(tidyr)
+library(tidyverse)
+library(tidybayes)
+library(knitr)
+library(scales)
+require(grid)
+require(ggpubr)
+require(gsubfn)
+library(purrr)
+library(ggplot2)
+
+```
+
+Set up to save figures, and set options, theme, palette.
+
+```{r 'setup', echo=FALSE, cache=FALSE}
+
+require("knitr")
+opts_knit$set(root.dir = "/Users/jkingstn/Dropbox/current projects/vowel parsing/reanalysis_30jul20")
+opts_chunk$set(dev = c("CairoPDF"), fig.align="center", fig.height = 9, fig.width = 8, out.width = "0.95\\linewidth", fig.path='figures/', pdf.options(encoding = "ISOLatin9.enc"))
+
+# options
+options(digits = 4,
+        mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+
+# ggplot theme
+theme_set(theme_bw())
+
+# color-blind palette
+cbbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+```
+
+Working directory:
+
+```{r, echo=FALSE}
+getwd()
+```
+
+## Prepare the data
+
+Read in the data file and reformat it.
+
+```{r}
+
+exp2 <- read.csv(file = "/Users/jkingstn/Dropbox/current projects/vowel parsing/reanalysis_30jul20/bw_31jul20/bwCompiledV2_05aug20.csv",
+         header = TRUE,
+         as.is = TRUE)
+
+head(exp2)
+
+exp2 <- exp2 %>% gather("f_b1_v01_td_01":"m_w2_v10_td_10", key = "spdRspVwlTd", value = "responses")
+
+head(exp2)
+
+```
+
+Code the cases for:
+
+1. speed = sentence rate = fas(t), med(ium), or slo(w),
+2. cRsp = consonant response = "b" or "w",
+3. sRsp = number of syllables response = "1" or "2",
+4. csRsp = combined responses = "b1", "b2", "w1", or "w2",
+5. vDuration = vowel duration = steps 1, 5, 6, or 10,
+6. tDuration = transition duration = steps 1-10.
+
+```{r}
+
+exp2$speed <- substr(exp2$spdRspVwlTd, 1, 1)
+
+exp2$speed <- ifelse(exp2$speed == "f", "fas",
+                     ifelse(exp2$speed == "m", "med", "slo"))
+
+exp2$speed <- factor(exp2$speed,
+                     levels = c("fas", "med", "slo"))
+
+exp2$nSpeed <- ifelse(exp2$speed == "fas", 1,
+                      ifelse(exp2$speed == "med", 0, -1))
+
+exp2$cRsp <- substr(exp2$spdRspVwlTd, 3, 3)
+
+exp2$sRsp <- as.numeric(substr(exp2$spdRspVwlTd, 4, 4))
+
+exp2$csRsp <- substr(exp2$spdRspVwlTd, 3, 4)
+
+exp2$vDuration <- as.numeric(substr(exp2$spdRspVwlTd, 7, 8))
+
+exp2$fVDuration <- factor(exp2$vDuration,
+                         levels = c("1", "5", "6", "10"))
+
+exp2$tDuration <- as.numeric(substr(exp2$spdRspVwlTd, 13, 14))
+
+head(exp2)
+
+```
+
+Calculate proportions for each response.
+
+```{r}
+
+exp2$maxRsps <- ifelse(exp2$tDuration <= 2 | exp2$tDuration >= 9, 4, 12)
+
+exp2$rspProp <- exp2$responses / exp2$maxRsps
+```
+
+Rewrite each response to a separate row.
+
+```{r}
+
+tmp <- {}
+
+for (i in 1:length(exp2$responses)) {
+  count <- exp2$responses[i]
+  if (count > 0) {
+    for (j in 1:count) {
+      tmp <- rbind(tmp, exp2[i,])
+    }
+  }
+}
+
+head(tmp)
+
+```
+
+Confirm rewrite.
+
+```{r}
+
+sum(exp2$responses)
+
+length(tmp$responses)
+
+unique(tmp$cRsp); unique(tmp$sRsp)
+
+exp2l <- tmp
+
+head(exp2l)
+
+```
+
+Code responses numerically.
+
+```{r}
+
+exp2l$ncRsp <- ifelse(exp2l$cRsp == "b", 0, 1)
+exp2l$nsRsp <- ifelse(exp2l$sRsp == "1", 0, 1)
+
+head(exp2l)
+
+xtabs(~ ncRsp + nsRsp,
+      data = exp2l)
+
+```
+
+## Condition
+
+Code condition and estimate mean proportions of each response. Condition is which buttons were used for each response. Left out of the eventual analysis.
+
+```{r}
+
+exp2$condition <- substr(exp2$subject, nchar(exp2$subject), nchar(exp2$subject))
+
+exp2$nCondition <- as.numeric(as.character(exp2$condition))
+
+exp2l$condition <- substr(exp2l$subject, nchar(exp2l$subject), nchar(exp2l$subject))
+
+exp2l$nCondition <- as.numeric(as.character(exp2l$condition))
+
+tmp0 <- exp2 %>% group_by(condition,
+                          csRsp) %>%
+  summarise(mean(rspProp))
+
+head(tmp0)
+
+colnames(tmp0) <- c("condition",
+                    "response",
+                    "xProp")
+
+tmp1 <- ggplot(tmp0,
+               aes(condition, xProp,
+                   fill = response))
+
+tmp2 <- tmp1 + geom_bar(stat = "identity",
+                        position = "dodge") +
+  scale_fill_manual(values = cbbPalette)
+
+tmp2
+
+ggsave(filename = "exp02RspsByCondition_13may21.pdf",
+       device = "pdf")
+```
+
+Plot the mean proportions in a separate panel for each response.
+
+Separate plots for vowel duration and speed.
+
+```{r}
+
+# vowel duration
+
+tmp0 <- exp2 %>% group_by(fVDuration,
+                          tDuration,
+                          cRsp,
+                          sRsp) %>%
+  summarise(mean(rspProp))
+
+head(tmp0)
+
+colnames(tmp0) <- c("vowelDuration",
+                    "transitionDuration",
+                    "consonantRsp",
+                    "syllableRsp",
+                    "xProp")
+
+tmp1 <- ggplot(tmp0,
+               aes(transitionDuration, xProp,
+                   colour = vowelDuration)) +
+  geom_line(size = 1) +
+  facet_grid(consonantRsp ~ syllableRsp) +
+  scale_x_continuous(name = "Transition Duration (short-long)",
+                     limits = c(1,10),
+                     breaks = seq(1, 10, 1)) +
+  scale_y_continuous(name = "Response Proportions",
+                     limits = c(0, 1),
+                     breaks = seq(0,1,0.25)) +
+  scale_color_manual(values = cbbPalette) +
+  guides(colour = guide_legend(title="Vowel Duration")) +
+  theme_bw()+
+  theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=18),
+        plot.title=element_text(size=28),
+        strip.text=element_text(size=16),
+        strip.background=element_rect(colour="black", fill="white"),
+        legend.text=element_text(size=16),
+        legend.title=element_text(size=18),
+        legend.position = "bottom",
+        legend.direction = "horizontal")
+
+tmp1
+
+ggsave(filename = "exp02RspsByTransitionVowelDuration_13may21.pdf",
+       device = "pdf")
+
+tmp0a <- exp2 %>% group_by(fVDuration,
+                          cRsp,
+                          sRsp) %>%
+  summarise(mean(rspProp))
+
+# head(tmp0)
+
+colnames(tmp0a) <- c("vowelDuration",
+                    "consonantRsp",
+                    "syllableRsp",
+                    "xProp")
+
+# speed
+
+tmp10 <- exp2 %>% group_by(speed,
+                          tDuration,
+                          cRsp,
+                          sRsp) %>%
+  summarise(mean(rspProp))
+
+head(tmp10)
+
+colnames(tmp10) <- c("speed",
+                    "transitionDuration",
+                    "consonantRsp",
+                    "syllableRsp",
+                    "xProp")
+
+tmp11 <- ggplot(tmp10,
+               aes(transitionDuration, xProp,
+                   colour = speed)) +
+  geom_line(size = 1) +
+  facet_grid(consonantRsp ~ syllableRsp) +
+  scale_x_continuous(name = "Transition Duration (short-long)",
+                     limits = c(1,10),
+                     breaks = seq(1, 10, 1)) +
+  scale_y_continuous(name = "Response Proportions",
+                     limits = c(0, 1),
+                     breaks = seq(0,1,0.25)) +
+  scale_color_manual(values = cbbPalette) +
+  guides(colour = guide_legend(title="Rate")) +
+  theme_bw()+
+  theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=18),
+        plot.title=element_text(size=28),
+        strip.text=element_text(size=16),
+        strip.background=element_rect(colour="black", fill="white"),
+        legend.text=element_text(size=16),
+        legend.title=element_text(size=18),
+        legend.position = "bottom",
+        legend.direction = "horizontal")
+
+tmp11
+
+ggsave(filename = "exp02RspsByTransitionSpeed_13may21.pdf",
+       device = "pdf")
+
+```
+
+## Bayesian model, using the brms package.
+
+Scale the predictors.
+
+```{r}
+
+# library(brms)
+
+exp2l$scTDuration <- scale(exp2l$tDuration)
+exp2l$scVDuration <- scale(exp2l$vDuration)
+exp2l$scSpeed <- scale(exp2l$nSpeed)
+
+exp2l$scCondition <- scale(exp2l$nCondition)
+
+exp2l$ncRsp <- ifelse(exp2l$cRsp == "b", 0, 1)
+exp2l$nsRsp <- ifelse(exp2l$sRsp == "1", 0, 1)
+
+```
+
+Condition alone. Skipped.
+
+```{r}
+
+# exp2l0 <- brm(mvbind(ncRsp, nsRsp) ~ 1 + scCondition + (1 | scCondition/subject),
+#           family = bernoulli(),
+#           data = exp2l,
+#           control = list(max_treedepth = 20, adapt_delta = 0.99),
+#   # prior = c(prior(normal(0.5, 0.1), class = Intercept),
+#   #           prior(cauchy(0, 1), class = sd)),
+#   iter = 8000,
+#   warmup = 1000,
+#   chains = 4,
+#   cores = 4,
+#   seed = 12
+# )
+# 
+# plot(exp2l0)
+# 
+# summary(exp2l0)
+
+```
+
+Transition duration, vowel duration, rate.
+
+Main effects.
+
+```{r}
+
+exp2l1 <- brm(mvbind(ncRsp, nsRsp) ~ scVDuration +
+            scTDuration +
+            scSpeed +
+            (1 | q | subject) +
+              (0 + scVDuration | q | subject) +
+              (0 + scTDuration | q | subject) +
+              (0 + scSpeed | q | subject),
+          family = bernoulli(link = "logit"),
+          data = exp2l,
+  control = list(max_treedepth = 20, adapt_delta = 0.99),
+  iter = 4000,
+  warmup = 1000,
+  chains = 4,
+  cores = 4,
+  seed = 12)
+
+```
+
+Interactions.
+
+```{r}
+
+exp2l2 <- brm(mvbind(ncRsp, nsRsp) ~ scVDuration *
+            scTDuration *
+            scSpeed +
+            (1 | q | subject) +
+              (0 + scVDuration | q | subject) +
+              (0 + scTDuration | q | subject) +
+              (0 + scSpeed | q | subject),
+          family = bernoulli(link = "logit"),
+          data = exp2l,
+  control = list(max_treedepth = 20, adapt_delta = 0.99),
+  iter = 4000,
+  warmup = 1000,
+  chains = 4,
+  cores = 4,
+  seed = 12)
+
+plot(exp2l1)
+
+plot(exp2l2)
+
+```
+
+Check the chains. Skipped.
+
+```{r}
+
+# summary(exp2l1)
+
+#exp2l1Post <- posterior_samples(exp2l1, add_chain = TRUE)
+
+#str(exp2l1Post)
+
+# summary(exp2l2)
+
+#exp2l2Post <- posterior_samples(exp2l2, add_chain = TRUE)
+
+#str(exp2l2Post)
+
+```
+
+Skipped. Keeps causing RStudio to abort.
+
+```{r}
+# mcmc_trace(exp2l1Post[, c(1:8)],
+#            size = 0.25 +
+#            scale_color_manual(values = cbbPalette) +
+#            theme(legend.position = "bottom",
+#                  legend.direction = "horizontal"))
+# 
+# library(GGally)
+# 
+# exp2l1Post %>% 
+#   select(1:8)  %>%
+#   ggpairs(ggplot2::aes(fill = cbbPalette[2],
+#                        alpha = 0.5,
+#                        size = 0.5))
+# 
+# exp2l2Post <- posterior_samples(exp2l2, add_chain = TRUE)
+# 
+# str(exp2l2Post)
+# 
+# mcmc_trace(exp2l2Post[, c(1:8)],
+#            size = 0.25 +
+#            scale_color_manual(values = cbbPalette) +
+#            theme(legend.position = "bottom",
+#                  legend.direction = "horizontal"))
+# 
+# # library(GGally)
+# 
+# exp2l2Post %>% 
+#   select(1:8)  %>%
+#   ggpairs(ggplot2::aes(fill = cbbPalette[2],
+#                        alpha = 0.5,
+#                        size = 0.5))
+
+```
+
+Model comparison.
+
+```{r}
+# plot(conditional_effects(exp2l1,
+#                          effects = "scDuration:scSpeed"), ask = FALSE)
+# plot(conditional_effects(exp2l2,
+#                          effects = "scDuration:scSpeed"), ask = FALSE)
+# 
+# exp2l1Plot <- conditional_effects(exp2l1, "scDuration:scSpeed")
+# 
+# exp2l1Plot <- conditional_effects(exp2l1, "scDuration:scSpeed")
+# 
+# plot(exp2l1Plot,
+#      plot = FALSE)[[1]] +
+#   scale_color_manual(values = cbbPalette) +
+#   scale_fill_manual(values = cbbPalette) +
+#   scale_x_continuous(limits = c(-1.75, 1.75),
+#                      breaks = seq(-1.5, 1.5, 0.5),
+#                      name = "scaled Duration") +
+#   scale_y_continuous(limits = c(0, 20),
+#                      breaks = seq(0, 20, 5),
+#                      name = "Fitted Count \"Two\"") +
+#   guides(colour = guide_legend(title = "scaled Rate"),
+#          fill = FALSE) +
+#   theme_bw() +
+#   theme(axis.text=element_text(size=12),
+#         axis.title=element_text(size=18),
+#         plot.title=element_text(size=28),
+#         strip.text=element_text(size=16),
+#         strip.background=element_rect(colour="black", fill="white"),
+#         legend.text=element_text(size=16),
+#         legend.title=element_text(size=18),
+#         legend.position = "bottom",
+#         legend.direction = "horizontal")
+# 
+# ggsave(file = "exp01Fitted.pdf",
+#        device = "pdf")
+
+exp2l2 <- add_criterion(exp2l2, c("waic", "loo"))
+exp2l1 <- add_criterion(exp2l1, c("waic", "loo"))
+
+exp2l2$waic; exp2l1$waic
+exp2l2$loo; exp2l1$loo
+
+l <- loo_compare(exp2l2, exp2l1, criterion = "loo")
+
+print(l, simplify = FALSE)
+
+w <- loo_compare(exp2l2, exp2l1, criterion = "waic")
+
+print(w, simplify = FALSE)
+
+summary(exp2l1)
+
+summary(exp2l2)
+
+# cbind(waic_diff = w[, 1] * -2,
+#       se = w[, 2] * 2) %>%
+#   round(digits = 2)
+# 
+# library(ggthemes)
+# library(bayesplot)
+# 
+# theme_set(theme_default()+
+#             theme_tufte())
+# 
+# w %>%
+#   data.frame() %>% 
+#   rownames_to_column(var = "model") %>% 
+#   
+#   ggplot() +
+#   geom_pointrange(aes(x = reorder(model, -waic), y = waic,
+#                       ymin = waic - se_waic,
+#                       ymax = waic + se_waic,
+#                       color = model),
+#                   shape = 16) +
+#   scale_color_manual(values = cbbPalette) +
+#   coord_flip() +
+#   labs(x = NULL, y = NULL,
+#        title = "WAIC") +
+#   theme(axis.ticks.y    = element_blank(),
+#         legend.position = "none")
+
+```
+
+Posterior predictive check.
+
+```{r}
+
+pp_check(exp2l1, resp = "ncRsp")
+
+pp_check(exp2l2, resp = "ncRsp")
+
+pp_check(exp2l1, resp = "nsRsp")
+
+pp_check(exp2l2, resp = "nsRsp")
+
+mcmc_plot(exp2l1,
+         type = "acf_bar")
+
+mcmc_plot(exp2l1,
+         type = "areas",
+         prob = 0.95)
+
+mcmc_plot(exp2l2,
+         type = "acf_bar")
+
+mcmc_plot(exp2l2,
+         type = "areas",
+         prob = 0.95)
+
+```
